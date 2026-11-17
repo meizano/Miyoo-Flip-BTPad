@@ -1,0 +1,7 @@
+{
+    "label": "BT/USB Gamepad",
+    "icon": "",
+    "iconsel": "",
+    "launch": "launch.sh",
+    "description": "Use this handheld as a Bluetooth or USB-cable gamepad (hold L1+R1+Select+Start to quit)"
+}
