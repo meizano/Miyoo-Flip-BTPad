@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+- Documentation release, no code changes.
+- README now states plainly that this fork was written with AI assistance, what was
+  verified (logic and simulated-configfs tests) and what was not (real USB HID output,
+  hosts other than the upstream-tested tablet).
+- README gained a Requirements section, a repository layout, install-from-release
+  instructions and a clearer statement of the USB mode's status.
+- Credits expanded: upstream authors, the SpruceOS files the device facts come from,
+  and the AI assistant's role.
+
 ## 0.2.0
 - Fork of [Miyoo-Flip-BTPad](https://github.com/gladiator1014/Miyoo-Flip-BTPad) with cable support.
 - New **USB HID gadget** backend (configfs + `f_hid` + `/dev/hidg0`), so the handheld can be

@@ -13,17 +13,41 @@ This fork adds:
 - a built-in **MagicX Mini Zero 28** mapping (`magicx-input`), including its
   digital L2/R2, `ABS_Z`/`ABS_RZ` right stick and MENU button;
 - **automatic mode selection**: Bluetooth when the device has a Bluetooth adapter,
-  USB cable when it does not.
+  USB cable when it does not;
+- per-device profiles in `mapping.json`, with the original single mapping still
+  accepted.
 
-**Status: v0.2.0.** The Bluetooth path is the upstream, hardware-tested path. The
-USB path follows the way SpruceOS itself sets up USB gadgets on the same devices
-(`App/USBStorageMode`), but it is new: please report what happens on your Zero 28,
-Flip or other SpruceOS handheld.
+> **AI-assisted project.** The code and documentation added by this fork were written
+> by an AI coding assistant working from the maintainer's direction, upstream sources
+> and SpruceOS's own device configuration. Read
+> [Credits and how this was built](#credits-and-how-this-was-built) before relying on it.
+
+**Status: v0.2.1.** The Bluetooth path is upstream's hardware-tested code, unchanged in
+behaviour. The USB path is new: it is built the same way SpruceOS's own USB gadget apps
+build theirs (`App/USBStorageMode`), and it passes this project's logic and
+simulated-configfs tests, but it has **not yet been confirmed on real hardware**. If it
+does not work, `--check` and `btpad.log` say why; the usual cause is a kernel without
+`usb_f_hid`. Reports for the Zero 28, Flip and other SpruceOS handhelds are welcome.
+
+## Requirements
+
+- **SpruceOS** on the handheld. Developed against the Miyoo Flip and the oakMOSS-based
+  MagicX Mini Zero 28. Other devices work if their pad matches a built-in profile or
+  you add one (see [Customising the buttons](#customising-the-buttons)).
+- **Root**, to grab the input device and to create the gadget. Spruce apps already run
+  as root, so launching from the menu is enough.
+- **USB mode:** a kernel with configfs gadget support and the HID function
+  (`CONFIG_USB_CONFIGFS_F_HID` / `usb_f_hid`), plus a USB device controller
+  (`/sys/class/udc`). `--check` tests both. You also need a data-capable cable and a
+  host that can act as USB host (Android device, PC, ...).
+- **Bluetooth mode:** a Bluetooth adapter and BlueZ (`bluetoothd`), as on the Flip.
 
 ## Install
 
-Copy the `BTPad` folder to `App/` on the SD card, so you have `App/BTPad/launch.sh`,
-then open **BT/USB Gamepad** from the Apps menu. The screen goes black; that is normal.
+Download `SpruceOS-BTPad.zip` from the [Releases](../../releases) page, or use the
+`BTPad` folder from this repo directly. Copy that folder to `App/` on the SD card, so
+you have `App/BTPad/launch.sh`, then open **BT/USB Gamepad** from the Apps menu. The
+screen goes black; that is normal.
 
 The app has no icon. If your theme shows a blank one, copy an icon from another app
 and fill in `icon` / `iconsel` in `config.json`.
@@ -54,6 +78,20 @@ in `BTPad/settings.json`, or run `btpad.py --usb` over SSH.
 4. Open a gamepad tester app to check the buttons.
 
 `settings.json` can force Bluetooth with `{"mode": "bt"}`, or run `btpad.py --bt`.
+
+## Repository layout
+
+```
+BTPad/                  what goes on the SD card
+  btpad.py              the whole app (standard library only)
+  launch.sh             finds Python and starts btpad.py, logging to btpad.log
+  config.json           Spruce app entry: "BT/USB Gamepad"
+  settings.json         transport: auto / usb / bt
+  mapping.json          per-device button and axis profiles
+README.md               this file
+CHANGELOG.md            version history
+RELEASE_NOTES_*.md      notes for each tagged release
+```
 
 ## Quit
 
@@ -211,11 +249,27 @@ the controller and the menu copy exits back to Spruce.
 5. Sends a report whenever a button/stick changes, plus a 10 Hz keep-alive so a
    dropped report cannot leave an input stuck.
 
-## Credits and license
+## Credits and how this was built
 
-Upstream BTPad by [gladiator1014](https://github.com/gladiator1014/Miyoo-Flip-BTPad),
-written with the help of an AI assistant and tested on a Miyoo Flip. This fork adds
-the USB backend, profile handling and the Zero 28 mapping; the Zero 28 codes are
-taken from SpruceOS's own `Zero28.cfg` / `simplepad` configuration.
+- **Upstream:** BTPad by [gladiator1014](https://github.com/gladiator1014/Miyoo-Flip-BTPad)
+  (MIT), written with the help of an AI assistant and tested on a Miyoo Flip. Its
+  Bluetooth implementation, HID report layout and D-Bus/L2CAP plumbing are kept here.
+- **This fork:** the USB HID backend, per-device profiles, MagicX Mini Zero 28 support,
+  the launcher changes, this README, the changelog and the release notes were **written
+  with AI assistance** — an AI coding assistant produced them from the maintainer's
+  direction, the upstream code and SpruceOS's own configuration. The code is not
+  hand-written; review it before relying on it for anything sensitive, and expect
+  rough edges rather than a polished commercial app.
+- **Sources for device facts:** input device names, key/axis codes, the configfs gadget
+  recipe and the Python paths come from the SpruceOS repository, mainly
+  `spruce/scripts/platform/oakmoss/Zero28.cfg` and `MagicXCommon.sh`, and
+  `App/USBStorageMode/usb_gadget.sh`.
+- **What has been checked:** Python syntax, unit tests for the button/axis/hat mapping,
+  the exit combo, the HID report descriptor and USB report length, `mapping.json`
+  format handling (new and legacy), and gadget creation/binding/report/unplug/removal
+  against a simulated configfs tree. Every code path was also reviewed by hand.
+- **What has not been checked:** real USB HID output on a Mini Zero 28 or any other
+  device, real pairing on hosts other than the upstream-tested Android tablet, and
+  behaviour on SpruceOS versions other than the ones those sources describe.
 
 MIT licensed, see `LICENSE`. Use at your own risk.
