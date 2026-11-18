@@ -630,6 +630,9 @@ class UsbGadget:
         self.own_gadget = False
         self.restore_udc = None
         self.old_product = None
+        self.old_manufacturer = None
+        self.old_vid = None
+        self.old_pid = None
         self.role_path = None
         self.role_restore = None
         self.host = False
@@ -776,7 +779,6 @@ class UsbGadget:
         # it happens BEFORE the unbind: the window in which the vendor's ADB
         # workqueue (android_work) can steal the controller back is then only
         # the few milliseconds between the unbind and our bind below.
-        self._rename_product()
         self.ep0 = os.open(FFS_EP0, os.O_RDWR)
         os.write(self.ep0, ffs_descriptors())
         os.write(self.ep0, ffs_strings())
@@ -785,6 +787,12 @@ class UsbGadget:
         if self.restore_udc:
             _write(self.gadget + "/UDC", "")
             log("USB: unbound %s" % os.path.basename(self.gadget))
+        # Hosts cache device names by VID/PID (notably Android), so the identity
+        # has to change too: otherwise a host that already knows this gadget as
+        # "Tina ADB" (VID 18d1 PID d002) keeps showing that cached name even
+        # though the product string now says Retro Gamepad. Do this while the
+        # gadget is unbound and restore everything on exit.
+        self._set_identity()
         os.symlink(self.fn, self.link)
         log("USB: function linked into %s" % os.path.basename(cfg))
         self._bind_udc()
@@ -792,28 +800,42 @@ class UsbGadget:
             % (self.udc, os.path.basename(self.gadget)))
         log("USB: waiting for the host to enable the HID function")
 
-    def _rename_product(self):
-        """The host should see the pad, not the vendor ADB gadget name."""
-        prod = self.gadget + "/strings/0x409/product"
-        try:
-            self.old_product = _read(prod)
-        except OSError:
-            self.old_product = None
-        if self.old_product != APP_NAME:
-            try:
-                _write(prod, APP_NAME)
-            except OSError:
-                self.old_product = None
-                return
-            log("USB: product string now %r (was %r)" % (APP_NAME, self.old_product))
+    # The firmware's gadget (g1) is borrowed for the FunctionFS path: make it
+    # present our own identity (product string, manufacturer, VID and PID)
+    # while it is ours. A host that has seen the ADB gadget before caches its
+    # name by VID/PID, so changing only the product string is not enough:
+    # Android keeps showing "Tina ADB" unless the identity changes too.
+    IDENTITY = (("old_product", "/strings/0x409/product", APP_NAME),
+                ("old_manufacturer", "/strings/0x409/manufacturer", "SpruceOS"),
+                ("old_vid", "/idVendor", USB_VID),
+                ("old_pid", "/idProduct", USB_PID))
 
-    def _restore_product(self):
-        if self.gadget and self.old_product:
+    def _set_identity(self):
+        for attr, path, new in self.IDENTITY:
+            full = self.gadget + path
             try:
-                _write(self.gadget + "/strings/0x409/product", self.old_product)
+                old = _read(full)
             except OSError:
-                pass
-        self.old_product = None
+                setattr(self, attr, None)
+                continue
+            setattr(self, attr, old)
+            if old != new:
+                try:
+                    _write(full, new)
+                except OSError:
+                    setattr(self, attr, None)
+                    continue
+                log("USB: %s now %r (was %r)" % (os.path.basename(path), new, old))
+
+    def _restore_identity(self):
+        for attr, path, _new in self.IDENTITY:
+            old = getattr(self, attr)
+            if self.gadget and old:
+                try:
+                    _write(self.gadget + path, old)
+                except OSError:
+                    pass
+            setattr(self, attr, None)
 
     def _bind_udc(self):
         """Write our controller into UDC. If something else (the vendor ADB
@@ -1046,8 +1068,10 @@ class UsbGadget:
                            stderr=subprocess.DEVNULL)
         except OSError:
             pass
+        # Restore the firmware's identity (product/manufacturer/VID/PID) while
+        # the gadget is unbound, before the vendor's ADB gadget is bound again.
+        self._restore_identity()
         if self.gadget and self.restore_udc:
-            self._restore_product()
             try:
                 _write(self.gadget + "/UDC", self.restore_udc)
             except OSError:

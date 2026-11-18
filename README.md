@@ -102,8 +102,12 @@ state, which is the first thing to look at when something does not work.
    - otherwise **FunctionFS**: the HID descriptors and control requests are
      handled from userspace and reports go to the interrupt IN endpoint. The
      function is added to the firmware's own gadget (ADB) because vendor
-     kernels allow only one gadget, and the gadget's product string becomes
-     **Retro Gamepad** while the pad runs.
+     kernels allow only one gadget. While the pad runs, that gadget presents
+     our own identity — manufacturer **SpruceOS**, product **Retro Gamepad**,
+     VID/PID **1209:b7ad** — and everything is restored to the firmware's
+     values ("Tina ADB", 18d1:d002) on exit. Changing the VID/PID matters:
+     hosts such as Android cache device names by VID/PID and would otherwise
+     keep calling the pad "Tina ADB".
 4. The firmware's ADB setup re-claims the USB controller asynchronously
    (the kernel's `android_work`), so the app prepares everything *before*
    unbinding and retries the bind, un-binding whatever raced it, until it wins.
@@ -116,9 +120,14 @@ state, which is the first thing to look at when something does not work.
   **no USB host** unless the cable is delivering data — use the data port and a
   data-capable cable. `--check` verifies the rest (configfs, UDC, HID
   function); `gamepadmode.log` in the app folder has the details.
-- **The pad shows up as "Tina ADB" or only an ADB interface.** The log line
-  `product string now 'Retro Gamepad'` must appear; the ADB interface staying
-  present next to the gamepad is expected on the Zero 28 (one shared gadget).
+- **The host shows "Tina ADB" instead of "Retro Gamepad".** This is expected
+  *before* you start the pad: with Gamepad Mode idle (or after exiting) the
+  handheld is the firmware's ADB gadget. Only **Start Gamepad Mode** switches
+  it to `1209:b7ad` "Retro Gamepad"; the log must show
+  `USB: product now 'Retro Gamepad' (was 'Tina ADB')` and the VID/PID lines.
+  Check the host's device list *after* the layout screen turns green. The ADB
+  interface staying next to the gamepad is expected on the Zero 28 (one shared
+  gadget) and does not affect gamepad input.
 - **The screen goes black and returns to the menu.** Check `gamepadmode.log`.
   The UI needs pysdl2 + SDL_ttf from PyUI (present on every SpruceOS install)
   and a usable TTF font in PyUI's fonts folder.

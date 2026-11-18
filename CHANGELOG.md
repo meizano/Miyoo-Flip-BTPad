@@ -1,5 +1,17 @@
 # Changelog — SpruceOS Gamepad Mode
 
+## 1.0.1
+- The FunctionFS backend now changes the borrowed gadget's **manufacturer,
+  product string, VID and PID** to `SpruceOS` / `Retro Gamepad` / `1209:b7ad`
+  while the pad runs (restoring the firmware's `Tina ADB` / `18d1:d002`
+  identity on exit). Hosts like Android cache device names by VID/PID and
+  could keep showing "Tina ADB" when only the product string changed.
+- README: document that the handheld is the firmware ADB gadget while Gamepad
+  Mode is idle, and when the name changes; record confirmed host/cable
+  combinations (PC C-to-C and A-to-C; Samsung S25 Edge and Lenovo Y700 with a
+  USB-C OTG adapter + USB-A→USB-C cable; direct C-to-C rejected by both
+  Android hosts).
+
 ## 1.0.0
 - **Independent app.** Gamepad Mode no longer shares code with BTPad:
   `GamepadMode/gamepadmode.py` is self-contained (the USB HID gadget, the
