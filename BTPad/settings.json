@@ -1,4 +1,0 @@
-{
-    "_note": "auto = Bluetooth when the device has a Bluetooth adapter, otherwise the USB cable. Use \"usb\" to force cable mode or \"bt\" to force Bluetooth. The MagicX Mini Zero 28 has no Bluetooth, so auto selects USB there.",
-    "mode": "auto"
-}

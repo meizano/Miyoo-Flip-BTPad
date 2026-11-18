@@ -1,7 +1,0 @@
-{
-    "label": "Gamepad Mode",
-    "icon": "",
-    "iconsel": "",
-    "launch": "launch.sh",
-    "description": "Use this handheld as a wired Retro Gamepad (USB-C). Remap buttons, disable buttons and set stick sensitivity in Settings."
-}

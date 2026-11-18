@@ -1,0 +1,8 @@
+{
+    "_note": "Optional per-device mapping overrides for Gamepad Mode. Profiles are matched by input device name. 'keys' maps an evdev key code to an HID button number (1=A south, 2=B east, 4=X north, 5=Y west, 7=L1, 8=R1, 9=L2, 10=R2, 11=Select, 12=Start, 13=Mode, 14=L3, 15=R3), 'dpad_keys' an evdev code to a direction, 'axes' an evdev ABS code to lx/ly/rx/ry, 'trigger_axes' an ABS code to an HID button. Fields you include replace the built-in values; fields you leave out keep them. The built-in profiles already cover the Miyoo Flip and the MagicX Mini Zero 28.",
+    "profiles": {
+        "magicx-input": {
+            "axes": {"0": "lx", "1": "ly", "2": "rx", "5": "ry"}
+        }
+    }
+}

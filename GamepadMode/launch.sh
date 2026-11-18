@@ -1,5 +1,8 @@
 #!/bin/sh
-# Gamepad Mode - SpruceOS app launcher (oakMOSS: MagicX Mini Zero 28 & friends)
+# Gamepad Mode - SpruceOS app launcher
+# Finds Spruce's Python, sets up the same SDL2 environment PyUI runs with,
+# kills stale instances of itself, and starts the app. Everything it needs
+# (python, SDL2, fonts) ships with SpruceOS itself.
 APPDIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$APPDIR" || exit 1
 
@@ -29,8 +32,8 @@ export SDL_JOYSTICK_DISABLE_UDEV=1
 
 echo "=== $(date) ===" >> gamepadmode.log
 
-# Kill any previous instance of this app (or the old btpad CLI): two SDL
-# processes fight over the framebuffer (flicker) and two pads fight over
+# Kill any previous instance of this app (or the old BTPad fork's app): two
+# SDL processes fight over the framebuffer (flicker) and two pads fight over
 # the input grab and the USB gadget. Match /proc cmdlines, never pkill -f
 # (this script's own ssh session could match and kill itself).
 mypid=$$
