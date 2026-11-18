@@ -137,8 +137,8 @@ state, which is the first thing to look at when something does not work.
   moisture in the phone's port can produce the same toast. **Confirmed
   working:** Samsung Galaxy S25 Edge and Lenovo Y700 (SD8 Elite) both reject
   a direct C-to-C cable but work with a **USB-C OTG adapter + USB-A→USB-C
-  cable** into the Zero 28's data port. To isolate the phone: try a known
-  USB OTG device (flash drive/mouse) with the same adapter — if that fails
+  cable** into the Zero 28's data port. (A PC works with either a C-to-C or
+  a USB-A→USB-C cable.) To isolate the phone: try a known OTG device (flash drive/mouse) with the same adapter — if that fails
   too, it is the phone/cable, not Gamepad Mode.
 - **The pad was working and stopped.** If the log shows the app fighting
   another copy, the launcher already kills stale instances — just relaunch.
