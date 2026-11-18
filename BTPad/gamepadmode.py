@@ -112,36 +112,55 @@ class ShimPad:
 
 
 class TestReader:
-    """Raw evdev reader for the Test Gamepad screen: keys AND axes."""
+    """Raw evdev reader for the Test Gamepad screen: keys AND axes, from
+    every event node (the pad's node name/number varies by device)."""
 
-    def __init__(self, path="/dev/input/event2"):
-        self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    def __init__(self):
+        self.fds = []
+        try:
+            nodes = sorted("/dev/input/" + d for d in os.listdir("/dev/input")
+                           if d.startswith("event"))
+        except OSError:
+            nodes = ["/dev/input/event2"]
+        for p in nodes:
+            try:
+                self.fds.append(os.open(p, os.O_RDONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
 
     def poll(self, state):
         """Feed one pass of events into a btpad.State."""
-        r, _, _ = select.select([self.fd], [], [], 0)
-        if not r:
-            return
-        try:
-            data = os.read(self.fd, EVENT_SIZE * 32)
-        except OSError:
-            return
-        for off in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
-            _s, _u, typ, code, val = struct.unpack(EVENT_FMT, data[off:off + EVENT_SIZE])
-            if typ in (EV_KEY, EV_ABS):
-                state.feed(ShimPad, typ, code, val)
+        for fd in self.fds:
+            r, _, _ = select.select([fd], [], [], 0)
+            if not r:
+                continue
+            try:
+                data = os.read(fd, EVENT_SIZE * 32)
+            except OSError:
+                continue
+            for off in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+                _s, _u, typ, code, val = struct.unpack(EVENT_FMT, data[off:off + EVENT_SIZE])
+                if typ in (EV_KEY, EV_ABS):
+                    state.feed(ShimPad, typ, code, val)
 
     def close(self):
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        for fd in self.fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 class PadInput:
     """Non-blocking evdev reader with key repeat for menu navigation."""
 
-    def __init__(self, paths):
+    def __init__(self, paths=None):
+        if paths is None:
+            try:
+                paths = sorted("/dev/input/" + d for d in os.listdir("/dev/input")
+                               if d.startswith("event"))
+            except OSError:
+                paths = ["/dev/input/event2", "/dev/input/event0"]
         self.fds = []
         for p in paths:
             try:
@@ -202,7 +221,8 @@ class Ui:
                                             0, 0, sdl2.SDL_WINDOW_FULLSCREEN_DESKTOP)
         if not self.window:
             raise RuntimeError("SDL_CreateWindow failed: %s" % sdl2.SDL_GetError().decode())
-        self.ren = sdl2.SDL_CreateRenderer(self.window, -1, sdl2.SDL_RENDERER_ACCELERATED)
+        self.ren = sdl2.SDL_CreateRenderer(self.window, -1,
+                                           sdl2.SDL_RENDERER_ACCELERATED | sdl2.SDL_RENDERER_PRESENTVSYNC)
         if not self.ren:
             self.ren = sdl2.SDL_CreateRenderer(self.window, -1, 0)
         if not self.ren:
@@ -300,7 +320,7 @@ class App:
 
     def __init__(self):
         self.ui = Ui()
-        self.input = PadInput(["/dev/input/event2", "/dev/input/event0"])
+        self.input = PadInput()
         self.settings = load_settings()
         self.screen = "main"
         self.sel = 0
@@ -312,6 +332,9 @@ class App:
         self.bat = read_battery()
         self.bat_at = time.time()
         self.test = None            # (reader, state) while testing the pad
+        self._last_draw = 0.0
+        self._usb_at = 0.0
+        self._usb_st_cache = None
 
     # ------------------------------------------------------------- helpers
     def say(self, s, secs=1.4):
@@ -653,6 +676,22 @@ class App:
         u.rect((u.w - w) // 2, u.h - 110, w, 48, HI, outline=True)
         u.draw_text(self.toast, u.w // 2, u.h - 100, 22, FG, bold=True, center="x")
 
+    def _usb_state(self):
+        """The UDC's link state, refreshed once a second: 'not attached'
+        means no host is electrically present (cable out, charge-only
+        cable, or the DC port instead of the data port)."""
+        if time.time() > self._usb_at:
+            self._usb_at = time.time() + 1.0
+            import glob as _g
+            self._usb_st_cache = None
+            for p in _g.glob("/sys/class/udc/*/state"):
+                try:
+                    with open(p) as f:
+                        self._usb_st_cache = f.read().strip()
+                except OSError:
+                    pass
+        return self._usb_st_cache
+
     # ------------------------------------------------------------- pad run
     def start_pad(self):
         u = self.ui
@@ -673,7 +712,9 @@ class App:
             rc = B.run(frame_cb=lambda state: self.draw_running(state),
                        overrides=overrides)
         except Exception as e:
+            import traceback
             log("pad crashed:", repr(e))
+            log(traceback.format_exc())
             self.say("Pad error: %s" % e, 3.0)
             return
         if rc == 0:
@@ -686,6 +727,10 @@ class App:
 
     def draw_running(self, state):
         """The live layout screen: RetroArch-style pad with press feedback."""
+        now = time.time()
+        if now - self._last_draw < 0.045:      # ~20 fps is plenty and stops flicker
+            return
+        self._last_draw = now
         u = self.ui
         W, H = u.w, u.h
         u.rect(0, 0, W, H, BG)
@@ -745,6 +790,14 @@ class App:
             ky = (state.ax[ay_name] - 128) / 127.0 * 26
             u.circle(int(sx + kx), int(sy + ky), 22, ON if on else (72, 78, 92))
 
+        st = self._usb_state() if self.screen != "padtest" else None
+        if st == "not attached":
+            u.draw_text("no USB host: check the cable is in the data port",
+                        W // 2, 60, 20, WARN, center="x")
+        elif st == "configured":
+            u.draw_text("USB host connected", W // 2, 60, 20, ON, center="x")
+        elif st:
+            u.draw_text("USB: %s" % st, W // 2, 60, 20, DIM, center="x")
         if self.screen == "padtest":
             u.draw_text("press Start+Select together to exit the test", W // 2, H - 30, 20, DIM, center="x")
         else:
@@ -780,12 +833,40 @@ class App:
         self.ui.quit()
 
 
-def main():
-    app = App()
+LOCK_FILE = "/tmp/gamepadmode.pid"
+
+
+def single_instance():
+    """Exit if another Gamepad Mode instance is already running (two
+    processes fight over the framebuffer and the gadget)."""
     try:
-        app.loop()
+        with open(LOCK_FILE) as f:
+            old = int(f.read().strip())
+        os.kill(old, 0)
+        print("Gamepad Mode is already running (pid %d); not starting twice" % old,
+              flush=True)
+        return False
+    except (OSError, ValueError):
+        pass
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def main():
+    if not single_instance():
+        return 1
+    try:
+        app = App()
+        try:
+            app.loop()
+        finally:
+            app.cleanup()
     finally:
-        app.cleanup()
+        try:
+            os.remove(LOCK_FILE)
+        except OSError:
+            pass
     return 0
 
 

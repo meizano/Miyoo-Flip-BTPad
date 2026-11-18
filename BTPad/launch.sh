@@ -28,4 +28,23 @@ export LD_LIBRARY_PATH="$SDL_DIR:/mnt/SDCARD/spruce/flip/lib:/usr/lib"
 export SDL_JOYSTICK_DISABLE_UDEV=1
 
 echo "=== $(date) ===" >> gamepadmode.log
+
+# Kill any previous instance of this app (or the old btpad CLI): two SDL
+# processes fight over the framebuffer (flicker) and two pads fight over
+# the input grab and the USB gadget. Match /proc cmdlines, never pkill -f
+# (this script's own ssh session could match and kill itself).
+mypid=$$
+for d in /proc/[0-9]*; do
+    pid="${d#/proc/}"
+    [ "$pid" = "$mypid" ] && continue
+    cmd="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"
+    case "$cmd" in
+        *gamepadmode.py*|*btpad.py*)
+            [ -f "$d/cmdline" ] && kill "$pid" 2>/dev/null && \
+                echo "killed stale instance $pid: $cmd" >> gamepadmode.log
+            ;;
+    esac
+done
+sleep 0.5
+
 exec "$PY" "$APPDIR/gamepadmode.py" >> gamepadmode.log 2>&1
