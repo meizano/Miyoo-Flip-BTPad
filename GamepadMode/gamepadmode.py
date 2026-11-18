@@ -1223,6 +1223,25 @@ def run_pad(overrides=None, frame_cb=None):
 
 
 # ---------------------------------------------------------------- diagnostics
+def hardware_issue():
+    """-> list of reasons this device cannot run the pad, or [] if it can.
+
+    Runs at launch so an unsupported device gets a clear on-screen answer
+    instead of a menu whose "Start" button only fails silently."""
+    missing = []
+    pads = open_pads()
+    for p in pads:
+        try:
+            os.close(p.fd)
+        except OSError:
+            pass
+    if not pads:
+        missing.append("no gamepad input device found on /dev/input")
+    if not have_usb_gadget():
+        missing.append("no USB device controller (no OTG/data port)")
+    return missing
+
+
 def check():
     print("python %s" % sys.version.split()[0])
     print("root:", "yes" if os.getuid() == 0 else "NO - the gadget needs root")
@@ -2132,13 +2151,54 @@ class App:
             else:
                 time.sleep(0.02)
 
+    def show_unsupported(self, missing):
+        """Explain on-screen why this device cannot be a wired gamepad."""
+        log("unsupported device:", "; ".join(missing))
+        u = self.ui
+        u.rect(0, 0, u.w, u.h, BG)
+        y = 48
+        u.draw_text("Gamepad Mode", u.w // 2, y, 36, WARN, bold=True, center="x")
+        y += 62
+        u.draw_text("This device cannot be used as a gamepad.", u.w // 2, y,
+                    22, FG, bold=True, center="x")
+        y += 42
+        u.draw_text("Missing hardware:", 40, y, 22, HI, bold=True)
+        y += 34
+        for line in missing:
+            u.draw_text("- " + line, 48, y, 20, FG)
+            y += 30
+        y += 18
+        try:
+            has_bt = bool(os.listdir("/sys/class/bluetooth"))
+        except OSError:
+            has_bt = False
+        notes = [
+            "This app needs a gamepad on /dev/input and a USB device",
+            "controller (OTG/data port) to create a USB HID gamepad.",
+            ("Bluetooth adapter found, but this app is USB-only;"
+             if has_bt else "No Bluetooth adapter detected;"),
+            "BTPad is the separate project that supports Bluetooth.",
+        ]
+        for line in notes:
+            u.draw_text(line, 40, y, 19, DIM)
+            y += 26
+        u.draw_text("Press A or B to return to Spruce", u.w // 2, u.h - 44,
+                    20, FG, center="x")
+        u.present()
+        end = time.time() + 30
+        while time.time() < end:
+            for code, val in self.input.poll():
+                if val and code in (KEY_A, KEY_B, KEY_MENU):
+                    return
+            time.sleep(0.03)
+
     def cleanup(self):
         self.stop_test()
         self.input.close()
         self.ui.quit()
 
 
-LOCK_FILE = "/tmp/gamepadmode.pid"
+LOCK_FILE = os.path.join(HERE, "gamepadmode.pid")
 
 
 def single_instance():
@@ -2158,6 +2218,120 @@ def single_instance():
     return True
 
 
+def show_unsupported(missing):
+    """Show a clear on-screen reason why this device cannot run the pad.
+
+    Try the normal SDL screen first (supported devices that simply lack a
+    UDC); if SDL is broken on this platform, draw straight to /dev/fb0 with
+    a tiny built-in font so the message is still visible. No SpruceOS file
+    is modified and nothing is written outside the app folder."""
+    log("unsupported device:", "; ".join(missing))
+    try:
+        app = App()
+        try:
+            app.show_unsupported(missing)
+        finally:
+            app.cleanup()
+        return
+    except Exception as e:
+        log("SDL message unavailable (%s); using framebuffer fallback" % e)
+
+    lines = ["GAMEPAD MODE - UNSUPPORTED DEVICE", "",
+             "This device cannot be used as a gamepad.",
+             "Missing hardware:", ""]
+    lines += ["- " + m for m in missing]
+    lines += ["", "This app needs a gamepad on /dev/input and a USB",
+              "device controller (OTG/data port).", "Bluetooth mode is in BTPad,",
+              "the project this app grew out of.", "", "Press A or B to return to Spruce."]
+    try:
+        _fb_text(lines)
+    except Exception as e:
+        log("framebuffer message unavailable:", e)
+
+
+# 5x7 bitmap font (5-bit rows) for the fallback message; covers A-Z, 0-9 and
+# the punctuation used above. Kept here so the message needs no external font.
+_FONT = {
+    " ": (0, 0, 0, 0, 0, 0, 0),
+    "A": (14, 17, 17, 31, 17, 17, 17), "B": (30, 17, 17, 30, 17, 17, 30),
+    "C": (14, 17, 16, 16, 16, 17, 14), "D": (30, 17, 17, 17, 17, 17, 30),
+    "E": (31, 16, 16, 30, 16, 16, 31), "F": (31, 16, 16, 30, 16, 16, 16),
+    "G": (14, 17, 16, 23, 17, 17, 15), "H": (17, 17, 17, 31, 17, 17, 17),
+    "I": (14, 4, 4, 4, 4, 4, 14), "J": (7, 2, 2, 2, 2, 18, 12),
+    "K": (17, 18, 20, 24, 20, 18, 17), "L": (16, 16, 16, 16, 16, 16, 31),
+    "M": (17, 27, 21, 21, 17, 17, 17), "N": (17, 25, 21, 19, 17, 17, 17),
+    "O": (14, 17, 17, 17, 17, 17, 14), "P": (30, 17, 17, 30, 16, 16, 16),
+    "Q": (14, 17, 17, 17, 21, 18, 13), "R": (30, 17, 17, 30, 20, 18, 17),
+    "S": (15, 16, 16, 14, 1, 1, 30), "T": (31, 4, 4, 4, 4, 4, 4),
+    "U": (17, 17, 17, 17, 17, 17, 14), "V": (17, 17, 17, 17, 17, 10, 4),
+    "W": (17, 17, 17, 21, 21, 27, 17), "X": (17, 17, 10, 4, 10, 17, 17),
+    "Y": (17, 17, 10, 4, 4, 4, 4), "Z": (31, 1, 2, 4, 8, 16, 31),
+    "0": (14, 17, 19, 21, 25, 17, 14), "1": (4, 12, 4, 4, 4, 4, 14),
+    "2": (14, 17, 1, 2, 4, 8, 31), "3": (31, 2, 4, 2, 1, 17, 14),
+    "4": (2, 6, 10, 18, 31, 2, 2), "5": (31, 16, 30, 1, 1, 17, 14),
+    "6": (6, 8, 16, 30, 17, 17, 14), "7": (31, 17, 1, 2, 4, 4, 4),
+    "8": (14, 17, 17, 14, 17, 17, 14), "9": (14, 17, 17, 15, 1, 2, 12),
+    "-": (0, 0, 0, 31, 0, 0, 0), ":": (0, 4, 4, 0, 4, 4, 0),
+    "/": (1, 1, 2, 4, 8, 16, 16), ".": (0, 0, 0, 0, 0, 4, 4),
+    "(": (2, 4, 8, 8, 8, 4, 2), ")": (8, 4, 2, 2, 2, 4, 8),
+    "=": (0, 0, 31, 0, 31, 0, 0), "+": (0, 4, 4, 31, 4, 4, 0),
+    "?": (14, 17, 1, 2, 4, 0, 4), ",": (0, 0, 0, 0, 4, 4, 8),
+}
+
+
+def _fb_text(lines):
+    """Draw the lines onto /dev/fb0 (32 bpp BGRA) with no SDL and no fonts."""
+    def readnum(p):
+        with open(p) as f:
+            return f.read().strip()
+    w, h = (int(x) for x in readnum("/sys/class/graphics/fb0/virtual_size").split(","))
+    bpp = int(readnum("/sys/class/graphics/fb0/bits_per_pixel"))
+    if bpp != 32 or w < 320 or h < 240:
+        raise RuntimeError("unsupported framebuffer %dx%d %dbpp" % (w, h, bpp))
+    bg = bytes((32, 26, 24, 255))   # BGRA for (24,26,32)
+    fg = bytes((235, 235, 235, 255))
+    hi = bytes((40, 170, 255, 255))  # orange headings
+    buf = bytearray(bg * (w * h))
+
+    def pixel(x, y, color):
+        if 0 <= x < w and 0 <= y < h:
+            o = (y * w + x) * 4
+            buf[o:o + 4] = color
+
+    def block(x, y, bw, bh, color):
+        for yy in range(y, y + bh):
+            for xx in range(x, x + bw):
+                pixel(xx, yy, color)
+
+    scale = max(2, min(4, w // 200))
+    step = 8 * scale
+    y = max(20, h // 12)
+    left = max(16, w // 14)
+    for i, line in enumerate(lines[:h // step]):
+        color = hi if i == 0 or line.startswith("-") else fg
+        line = line.upper()
+        for ci, ch in enumerate(line):
+            rows = _FONT.get(ch, _FONT["?"])
+            for ry, bits in enumerate(rows):
+                for rx in range(5):
+                    if bits & (1 << (4 - rx)):
+                        block(left + (ci * 6 + rx) * scale, y + ry * scale,
+                              scale, scale, color)
+        y += step
+    fd = os.open("/dev/fb0", os.O_RDWR)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        view = memoryview(buf)
+        while view:
+            n = os.write(fd, view)
+            if not n:
+                break
+            view = view[n:]
+    finally:
+        os.close(fd)
+    time.sleep(2)
+
+
 def main():
     if "--check" in sys.argv:
         check()
@@ -2170,13 +2344,17 @@ def main():
         return 0
     if not single_instance():
         return 1
+    app = None
     try:
+        missing = hardware_issue()
+        if missing:
+            show_unsupported(missing)
+            return 0
         app = App()
-        try:
-            app.loop()
-        finally:
-            app.cleanup()
+        app.loop()
     finally:
+        if app is not None:
+            app.cleanup()
         try:
             os.remove(LOCK_FILE)
         except OSError:

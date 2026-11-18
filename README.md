@@ -116,6 +116,12 @@ state, which is the first thing to look at when something does not work.
 
 ## Troubleshooting
 
+- **The app opens with "Gamepad Mode - unsupported device" instead of the
+  menu.** The device lacks a USB device controller (OTG/data port) or a
+  gamepad input device — it cannot be a wired gamepad. The message lists
+  exactly what is missing and the app returns to Spruce. This is what the
+  **Miyoo Mini Flip (armv7)** does: it has no UDC, no Bluetooth adapter and
+  no gamepad evdev node. The **MagicX Mini Zero 28** is supported.
 - **Nothing appears on the tablet/PC.** Check the layout screen: it says
   **no USB host** unless the cable is delivering data — use the data port and a
   data-capable cable. `--check` verifies the rest (configfs, UDC, HID

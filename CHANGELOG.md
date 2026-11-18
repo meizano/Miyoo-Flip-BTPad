@@ -1,5 +1,26 @@
 # Changelog — SpruceOS Gamepad Mode
 
+## 1.0.2
+- **Unsupported devices now explain themselves at launch.** Before opening
+  the UI the app checks for a gamepad input device and a USB device
+  controller; if either is missing it shows an on-screen "Gamepad Mode -
+  unsupported device" message listing what is missing and why (and that
+  Bluetooth mode lives in BTPad), then returns to Spruce. The message is
+  drawn with SDL when available and falls back to a tiny built-in 5x7 font
+  written straight to `/dev/fb0` on devices where SDL cannot initialize.
+- **Launcher portability:** validates each Python candidate by actually
+  running it (some armv7 images ship an aarch64 binary at the "flip" path),
+  detects 32- vs 64-bit and sets the matching library paths, and picks the
+  first SDL2 directory that really loads. This keeps one SD card usable in
+  both an aarch64 Zero 28 and an armv7 Miyoo Mini Flip.
+- The single-instance lock moved from `/tmp` into the app folder; with the
+  exception of runtime USB gadget/evdev state, everything the app creates
+  stays inside `GamepadMode/`.
+- **Unsupported hardware:** the Miyoo Mini Flip (armv7) has no USB device
+  controller, no Bluetooth adapter and no gamepad evdev node, so it can only
+  show the message above — Gamepad Mode needs a wired USB data/OTG port.
+  See the README for confirmed working hosts.
+
 ## 1.0.1
 - The FunctionFS backend now changes the borrowed gadget's **manufacturer,
   product string, VID and PID** to `SpruceOS` / `Retro Gamepad` / `1209:b7ad`
