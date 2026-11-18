@@ -2292,8 +2292,14 @@ def _fb_text(lines):
     fg = bytes((235, 235, 235, 255))
     hi = bytes((40, 170, 255, 255))  # orange headings
     buf = bytearray(bg * (w * h))
+    # Some panels map /dev/fb0 to the display rotated 180 degrees (the Miyoo
+    # Mini Flip does). Pre-rotate our pixels so the text reads upright. Set
+    # GAMEPADMODE_FB_ROTATE=0 on a device whose framebuffer is already upright.
+    rotate = os.environ.get("GAMEPADMODE_FB_ROTATE", "180") != "0"
 
     def pixel(x, y, color):
+        if rotate:
+            x, y = w - 1 - x, h - 1 - y
         if 0 <= x < w and 0 <= y < h:
             o = (y * w + x) * 4
             buf[o:o + 4] = color

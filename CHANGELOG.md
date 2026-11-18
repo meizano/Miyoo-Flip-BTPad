@@ -1,5 +1,11 @@
 # Changelog — SpruceOS Gamepad Mode
 
+## 1.0.3
+- The framebuffer fallback for unsupported devices now pre-rotates its text
+  **180 degrees** for panels (like the Miyoo Mini Flip) whose `/dev/fb0` is
+  mapped upside down. Set `GAMEPADMODE_FB_ROTATE=0` if a device's framebuffer
+  is already upright.
+
 ## 1.0.2
 - **Unsupported devices now explain themselves at launch.** Before opening
   the UI the app checks for a gamepad input device and a USB device
