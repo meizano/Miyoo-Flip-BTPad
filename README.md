@@ -8,8 +8,14 @@ This is a fork of [gladiator1014/Miyoo-Flip-BTPad](https://github.com/gladiator1
 (MIT). The upstream app only did Bluetooth and only knew the Miyoo Flip's controller.
 This fork adds:
 
-- a **USB HID gadget backend** (`configfs` + `/dev/hidg0`), so the handheld can be
-  plugged straight into an Android tablet, phone or PC;
+- the **Gamepad Mode app**: an on-device menu to start the pad, test the controls
+  without connecting, remap or disable buttons, set analog stick sensitivity, reset
+  and save; while the pad runs it shows a controller layout with live press feedback
+  and the battery percentage;
+- a **USB HID gadget backend** that works even on kernels without the configfs HID
+  function (such as the Zero 28's), by driving a FunctionFS HID function in
+  userspace, so the handheld can be plugged straight into an Android tablet, phone
+  or PC;
 - a built-in **MagicX Mini Zero 28** mapping (`magicx-input`), including its
   digital L2/R2, `ABS_Z`/`ABS_RZ` right stick and MENU button;
 - **automatic mode selection**: Bluetooth when the device has a Bluetooth adapter,
@@ -22,12 +28,14 @@ This fork adds:
 > and SpruceOS's own device configuration. Read
 > [Credits and how this was built](#credits-and-how-this-was-built) before relying on it.
 
-**Status: v0.2.1.** The Bluetooth path is upstream's hardware-tested code, unchanged in
-behaviour. The USB path is new: it is built the same way SpruceOS's own USB gadget apps
-build theirs (`App/USBStorageMode`), and it passes this project's logic and
-simulated-configfs tests, but it has **not yet been confirmed on real hardware**. If it
-does not work, `--check` and `btpad.log` say why; the usual cause is a kernel without
-`usb_f_hid`. Reports for the Zero 28, Flip and other SpruceOS handhelds are welcome.
+**Status: v0.3.0.** The Bluetooth path is upstream's hardware-tested code, unchanged in
+behaviour. The USB path has been **confirmed on real hardware**: a MagicX Mini Zero 28
+running this fork enumerates on Windows as a gamepad named **Retro Gamepad** (in
+`joy.cpl`), with all buttons, the D-pad, both sticks and stick clicks working. Because
+the Zero 28's kernel ships without `CONFIG_USB_CONFIGFS_F_HID`, the USB backend
+normally runs through FunctionFS instead (see [How it works](#how-it-works)); kernels
+that do have `f_hid` still use the simpler configfs path. `--check` and `btpad.log`
+say which one was chosen.
 
 ## Requirements
 
@@ -36,18 +44,36 @@ does not work, `--check` and `btpad.log` say why; the usual cause is a kernel wi
   you add one (see [Customising the buttons](#customising-the-buttons)).
 - **Root**, to grab the input device and to create the gadget. Spruce apps already run
   as root, so launching from the menu is enough.
-- **USB mode:** a kernel with configfs gadget support and the HID function
-  (`CONFIG_USB_CONFIGFS_F_HID` / `usb_f_hid`), plus a USB device controller
-  (`/sys/class/udc`). `--check` tests both. You also need a data-capable cable and a
-  host that can act as USB host (Android device, PC, ...).
+- **USB mode:** a kernel with configfs gadget support and a USB device controller
+  (`/sys/class/udc`). The HID function can come from the kernel's `usb_f_hid`, or —
+  when that is missing — from FunctionFS, which this fork drives from userspace.
+  `--check` tests what is available. You also need a data-capable cable and a host
+  that can act as USB host (Android device, PC, ...).
 - **Bluetooth mode:** a Bluetooth adapter and BlueZ (`bluetoothd`), as on the Flip.
 
 ## Install
 
 Download `SpruceOS-BTPad.zip` from the [Releases](../../releases) page, or use the
-`BTPad` folder from this repo directly. Copy that folder to `App/` on the SD card, so
-you have `App/BTPad/launch.sh`, then open **BT/USB Gamepad** from the Apps menu. The
-screen goes black; that is normal.
+`BTPad` folder from this repo directly. Copy that folder to `App/` on the SD card —
+`App/GamepadMode` is a good name — so you have `App/GamepadMode/launch.sh`, then open
+**Gamepad Mode** from the Apps menu.
+
+### The Gamepad Mode app
+
+- **Start Gamepad Mode** runs the pad. The screen shows a controller layout with
+  live press feedback and the battery percentage; quit with L1+R1+Select+Start
+  (held 2 s), which returns you to Spruce.
+- **Test Gamepad** shows the same live layout without starting USB or Bluetooth —
+  useful for checking a remap before connecting. Leave with Start+Select together.
+- **Settings** opens:
+  - **Remap Buttons** — pick a button, then press the physical button you want for
+    it (commit on release). Press **Start+Select together** to cancel. Every button,
+    including B, can be remapped.
+  - **Disable Buttons** — toggle any button off entirely.
+  - **Analog Sensitivity** — 50–150 % per stick axis, applied around the centre.
+  - **Reset to Defaults**, **Save Configuration**, **OK**.
+- Settings are stored in `settings_ui.json` inside the app folder and are applied
+  every time the pad starts.
 
 The app has no icon. If your theme shows a blank one, copy an icon from another app
 and fill in `icon` / `iconsel` in `config.json`.
@@ -57,8 +83,9 @@ and fill in `icon` / `iconsel` in `config.json`.
 1. Plug a **data-capable** USB-C cable into the handheld and into the tablet/PC.
    The tablet/PC is the USB host; the handheld is the gamepad.
 2. Android may show a "USB device connected" notice. Allow it if asked.
-3. The host sees a gamepad named **MagicX Zero 28 Pad** (or **Miyoo Flip Pad** on a
-   Flip). There is no pairing and no driver to install.
+3. The host sees a gamepad named **Retro Gamepad**. There is no pairing and no
+   driver to install. (The firmware's ADB interface may still be listed next to
+   it; they share the one USB gadget.)
 4. Open a gamepad tester app / the game and check the buttons.
 
 On the Mini Zero 28 (no Bluetooth), auto mode selects USB. You can also force it:
@@ -82,10 +109,12 @@ in `BTPad/settings.json`, or run `btpad.py --usb` over SSH.
 ## Repository layout
 
 ```
-BTPad/                  what goes on the SD card
-  btpad.py              the whole app (standard library only)
-  launch.sh             finds Python and starts btpad.py, logging to btpad.log
-  config.json           Spruce app entry: "BT/USB Gamepad"
+BTPad/                  what goes on the SD card (as App/GamepadMode)
+  btpad.py              the pad itself (standard library only)
+  gamepadmode.py        the Gamepad Mode UI (menu, settings, live layout)
+  launch.sh             finds Python and starts gamepadmode.py, logging to
+                        gamepadmode.log
+  config.json           Spruce app entry: "Gamepad Mode"
   settings.json         transport: auto / usb / bt
   mapping.json          per-device button and axis profiles
 README.md               this file
@@ -95,8 +124,9 @@ RELEASE_NOTES_*.md      notes for each tagged release
 
 ## Quit
 
-Hold **L1 + R1 + Select + Start** for 2 seconds. The app disconnects the host
-(USB gadget removed, or Bluetooth handed back to Spruce) and returns to the menu.
+Hold **L1 + R1 + Select + Start** for 2 seconds. The pad disconnects the host
+(USB gadget released, or Bluetooth handed back to Spruce) and the app exits back
+to Spruce's menu.
 
 ## Controls
 
@@ -133,11 +163,13 @@ BTPad runs **as root**. Read this if you are cautious:
 - Takes exclusive control of the gamepad input device (`MIYOO Player1` on the Flip,
   `magicx-input` on the Zero 28) so Spruce's menu does not react to button presses
   while you play.
-- **USB mode** mounts `configfs` if needed, creates a gadget named `btpad`,
-  binds it to the device's USB controller (`/sys/class/udc`), and writes reports to
-  `/dev/hidg0`. It does **not** touch `bluetoothd`. On quit it unbinds and removes
-  the gadget. Only one USB gadget can own the port at a time: exit Spruce's
-  **USB Storage Mode** (and, on devices that use it, `adbd`) first.
+- **USB mode** mounts `configfs` if needed, prepares a HID function — the kernel's
+  `f_hid` when present, otherwise a FunctionFS HID function served from userspace —
+  and adds it to the firmware's own gadget so both ADB and the gamepad share the
+  port. While it runs, the gadget's product string is **Retro Gamepad**; the
+  original name is restored on quit. It does **not** touch `bluetoothd`. Only one
+  USB gadget can own the port at a time: exit Spruce's **USB Storage Mode** (and,
+  on devices that use it, `adbd`) first.
 - **Bluetooth mode restarts `bluetoothd` without its `input` plugin.** BlueZ will
   not let a device present itself as a Bluetooth HID gamepad while that plugin is
   loaded. Spruce's normal Bluetooth menu (pairing speakers, controllers) will not
@@ -150,10 +182,10 @@ BTPad runs **as root**. Read this if you are cautious:
 - Makes no network connections. The only file it writes is its own log
   (`btpad.log`, plus optional `bluetoothd.log` with `--debug`).
 
-Everything is in `btpad.py` (standard library only). Spruce's Python on the Flip has
-no `dbus` module and no Bluetooth socket support, so BTPad contains a small D-Bus
-client and uses `ctypes` for the Bluetooth sockets. The USB backend uses the kernel's
-configfs HID function (`usb_f_hid` / `f_hid`).
+Everything is in `btpad.py` and `gamepadmode.py` (standard library only, plus
+pysdl2 for the UI, which Spruce's PyUI already ships). Spruce's Python on the Flip
+has no `dbus` module and no Bluetooth socket support, so BTPad contains a small
+D-Bus client and uses `ctypes` for the Bluetooth sockets.
 
 ## Customising the buttons
 
@@ -202,20 +234,20 @@ the controller and the menu copy exits back to Spruce.
 
 ## Troubleshooting
 
-- **USB: nothing appears on the tablet/PC.** Run `--check`. `USB HID gadget` must say
-  `OK - HID function available (UDC ...)`. Check `btpad.log` for `USB gadget ready`
-  and, after plugging in, `USB host connected - pad is live`. Use a data cable, and
-  make sure the tablet is acting as USB host.
-- **`the kernel has no USB HID gadget function (configfs f_hid/usb_f_hid)`.** The
-  kernel was built without `CONFIG_USB_CONFIGFS_F_HID`, so USB HID cannot work on
-  that firmware. Bluetooth mode (on devices with Bluetooth) is unaffected. Report
-  it; a kernel/module with `usb_f_hid` is needed.
-- **`no USB device controller`.** `/sys/class/udc` is empty: the port or kernel has
-  no gadget mode. Spruce's USB Storage Mode uses the same support, so if that works,
-  this should too.
+- **USB: nothing appears on the tablet/PC.** Run `--check`. It reports whether the
+  HID function is available and which backend (configfs or FunctionFS) will be used.
+  Check `gamepadmode.log` (or `btpad.log` over SSH) for `USB HID gadget ... ready`
+  and, after plugging in, `first report accepted by the host`. Use a data cable,
+  and make sure the tablet is acting as USB host.
+- **USB: the pad shows up as "Tina ADB" or an ADB interface only.** That is the
+  firmware's own gadget name before BTPad rewrites the product string; make sure
+  the log says `product string now 'Retro Gamepad'` and that the pad is actually
+  running. The ADB interface staying present next to the gamepad is expected on
+  the Zero 28 (they share one gadget).
 - **`could not bind the USB gadget`.** Another gadget owns the port (Spruce USB
   Storage Mode, `adbd`, or a stale gadget). Exit those and retry; a reboot clears
-  anything left over.
+  anything left over. BTPad retries the bind automatically because the firmware's
+  ADB daemon sometimes grabs the controller back mid-bind.
 - **USB works but the pad stops after unplug/replug.** It should reconnect by itself
   within a second. If it does not, check `btpad.log`; `--check` also helps.
 - **Tablet cannot see the Bluetooth pad.** Check Bluetooth is on in Spruce first,
@@ -236,6 +268,13 @@ the controller and the menu copy exits back to Spruce.
   `/mnt/sdcard/spruce/flip/bin/python3` (Flip) and
   `/mnt/sdcard/spruce/bin/python/bin/python3.10` (oakMOSS/MagicX). Check which
   exists on your firmware.
+- **Gamepad Mode crashes back to the menu.** Check `gamepadmode.log` in the app
+  folder. The UI needs pysdl2 + SDL_ttf from Spruce's PyUI (`/mnt/SDCARD/App/PyUI`);
+  on the Zero 28 the panel is 640x480 and the UI is drawn for that.
+- **Handheld hard-resets under load / SD card goes read-only.** This fork saw
+  power-related resets with a low battery while the USB port was not powering the
+  device. Charge from a dedicated charger, keep the battery above ~30 % for long
+  sessions, and `mount -o remount,rw /mnt/SDCARD` if the card flips read-only.
 
 ## How it works
 
@@ -244,9 +283,18 @@ the controller and the menu copy exits back to Spruce.
 3. Bluetooth: registers an SDP HID record with BlueZ, listens on L2CAP PSM 17/19
    for the host's HID control/interrupt channels, and sends reports with the `0xA1`
    DATA prefix.
-4. USB: creates a configfs HID gadget with the same report descriptor and writes
-   the report to `/dev/hidg0` whenever a host has configured the gadget.
-5. Sends a report whenever a button/stick changes, plus a 10 Hz keep-alive so a
+4. USB, configfs path (kernels with `f_hid`): creates a configfs HID gadget with the
+   same report descriptor and writes the report to its `hidg` node whenever a host
+   has configured the gadget.
+5. USB, FunctionFS path (kernels without `f_hid`, e.g. the Zero 28): the firmware's
+   own gadget `g1` is briefly unbound, a FunctionFS HID function is prepared and
+   linked into its configuration, and the gadget is bound again. BTPad then serves
+   the HID descriptors and reports from userspace over `/dev/usb-ffs/btpad/ep1`,
+   next to the firmware's ADB function, which keeps working. The vendor ADB setup
+   re-claims the controller asynchronously (the kernel's `android_work`), so BTPad
+   prepares everything *before* unbinding and retries the bind, un-binding whatever
+   raced it, until it wins.
+6. Sends a report whenever a button/stick changes, plus a 10 Hz keep-alive so a
    dropped report cannot leave an input stuck.
 
 ## Credits and how this was built
@@ -268,8 +316,12 @@ the controller and the menu copy exits back to Spruce.
   the exit combo, the HID report descriptor and USB report length, `mapping.json`
   format handling (new and legacy), and gadget creation/binding/report/unplug/removal
   against a simulated configfs tree. Every code path was also reviewed by hand.
-- **What has not been checked:** real USB HID output on a Mini Zero 28 or any other
-  device, real pairing on hosts other than the upstream-tested Android tablet, and
-  behaviour on SpruceOS versions other than the ones those sources describe.
+- **What has been confirmed on hardware:** the FunctionFS USB path end-to-end on a
+  MagicX Mini Zero 28 (Windows 10/11: composite device with ADB + HID gamepad,
+  enumerated as "Retro Gamepad" in `joy.cpl`; all buttons, D-pad, sticks and stick
+  clicks verified), and the Gamepad Mode UI on the device (menus, remap, disable,
+  sensitivity, test mode, exit combo).
+- **What has not been checked:** real pairing over Bluetooth on hosts other than the
+  upstream-tested Android tablet, other SpruceOS versions, and other handhelds.
 
 MIT licensed, see `LICENSE`. Use at your own risk.

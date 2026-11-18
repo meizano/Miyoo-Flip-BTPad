@@ -49,6 +49,19 @@ PSM_CTRL, PSM_INTR = 0x11, 0x13
 AF_BLUETOOTH, BTPROTO_L2CAP = 31, 0
 EXIT_HOLD_SECONDS = 2.0  # hold L1+R1+Select+Start to quit
 
+# What the pad calls itself on the USB cable. The existing vendor gadget keeps
+# its own ADB identity, so this is written over its product string while the
+# pad runs and put back on exit.
+USB_PRODUCT = "Retro Gamepad"
+
+# Logical button name -> the HID button number the outside world sees (1-based).
+# Remapping and disabling in the Gamepad Mode settings work on these names.
+LOGICAL_BUTTONS = [("A", 1), ("B", 2), ("X", 4), ("Y", 5),
+                   ("L1", 7), ("R1", 8), ("L2", 9), ("R2", 10),
+                   ("Select", 11), ("Start", 12), ("Menu", 13),
+                   ("L3", 14), ("R3", 15)]
+AXIS_NAMES = ("lx", "ly", "rx", "ry")
+
 # ---------------------------------------------------------------- HID descriptor
 # Report ID 1: 16 buttons | hat (4 bits) + 4 pad | X Y Z Rz (8 bit each)
 REPORT_DESC = bytes([
@@ -258,12 +271,20 @@ def scale_axis(value, lo, hi):
 
 
 class State:
-    def __init__(self, keymap, dpad_keys, axes, trig):
+    def __init__(self, keymap, dpad_keys, axes, trig, sensitivity=None):
         self.keymap, self.dpad_keys, self.axes, self.trig = keymap, dpad_keys, axes, trig
+        self.sensitivity = dict(sensitivity or {})
         self.buttons = 0
         self.held = set()
         self.dir = {"up": 0, "down": 0, "left": 0, "right": 0}
         self.ax = {"lx": 128, "ly": 128, "rx": 128, "ry": 128}
+
+    def _sens(self, name, v):
+        """User-set analog sensitivity: k% around the centre, clamped."""
+        k = self.sensitivity.get(name, 100)
+        if k == 100:
+            return v
+        return max(0, min(255, int(round(128 + (v - 128) * k / 100.0))))
 
     def hat(self):
         x = self.dir["right"] - self.dir["left"]
@@ -274,7 +295,8 @@ class State:
     def report(self):
         b, a = self.buttons, self.ax
         return bytes([0x01, b & 0xFF, (b >> 8) & 0xFF, self.hat(),
-                      a["lx"], a["ly"], a["rx"], a["ry"]])
+                      self._sens("lx", a["lx"]), self._sens("ly", a["ly"]),
+                      self._sens("rx", a["rx"]), self._sens("ry", a["ry"])])
 
     def feed(self, pad, etype, code, value):
         """Returns True if the report changed."""
@@ -895,9 +917,18 @@ class BtLink:
 
 
 # ---------------------------------------------------------------- USB HID gadget
-# configfs + f_hid. The oakMOSS/MagicX devices (Zero 28 etc.) use
-# /sys/kernel/config/usb_gadget/g1 for USB storage, so the same kernel has
-# configfs gadget support; we create our own gadget next to it.
+# Two ways to become a USB HID gamepad:
+#
+#  * configfs + f_hid  -> /dev/hidg0. Simple, but the kernel must have
+#    CONFIG_USB_CONFIGFS_F_HID. The Miyoo Flip does; TinaLinux on the
+#    MagicX/oakMOSS handhelds does not.
+#  * configfs + FunctionFS (ffs) -> the HID class is implemented here:
+#    descriptors go to ep0, HID control requests are answered from userspace,
+#    reports go to an interrupt IN endpoint. Every gadget kernel has this.
+#
+# The MagicX also allows only *one* gadget, already taken by g1 (adb), so the
+# ffs path adopts that gadget instead of creating a second one and puts it back
+# the way it was on exit.
 CONFIGFS_ROOT = "/sys/kernel/config"
 USB_GADGET_ROOT = CONFIGFS_ROOT + "/usb_gadget"
 USB_GADGET_NAME = "btpad"
@@ -906,10 +937,24 @@ USB_VID = "0x1209"   # pid.codes (open-source vendor id)
 USB_PID = "0xb7ad"   # BTPad
 USB_HIDG = "/dev/hidg0"
 
+FFS_NAME = "btpad"
+FFS_DIR = "/dev/usb-ffs/" + FFS_NAME
+FFS_EP0 = FFS_DIR + "/ep0"
+FFS_EP_IN = FFS_DIR + "/ep81"   # named after the endpoint descriptor address
+
+FFS_BIND, FFS_UNBIND, FFS_ENABLE, FFS_DISABLE, FFS_SETUP = 0, 1, 2, 3, 4
+HID_DESC = struct.pack("<BBHBBBH", 9, 0x21, 0x0111, 0, 1, 0x22, len(REPORT_DESC))
+
 
 def _write(path, value):
+    # configfs/sysfs attribute writes of zero bytes are silently ignored, so an
+    # empty value still needs the terminating newline (that is how "echo > UDC"
+    # unbinds a gadget).
+    text = str(value)
+    if not text.endswith("\n"):
+        text += "\n"
     with open(path, "w") as f:
-        f.write(str(value))
+        f.write(text)
 
 
 def _read(path):
@@ -917,12 +962,60 @@ def _read(path):
         return f.read().strip()
 
 
-def first_udc():
+def udc_names():
     try:
-        names = sorted(os.listdir("/sys/class/udc"))
+        return sorted(os.listdir("/sys/class/udc"))
     except OSError:
-        return None
+        return []
+
+
+def first_udc():
+    names = udc_names()
     return names[0] if names else None
+
+
+def udc_state(udc):
+    try:
+        return _read("/sys/class/udc/%s/state" % udc)
+    except OSError:
+        return "unknown"
+
+
+def bound_udcs():
+    """UDCs already claimed by a gadget: {udc name: gadget name}."""
+    out = {}
+    for path in glob.glob(USB_GADGET_ROOT + "/*/UDC"):
+        try:
+            name = _read(path)
+        except OSError:
+            continue
+        if name and name != USB_GADGET_NAME:
+            out[name] = os.path.basename(os.path.dirname(path))
+    return out
+
+
+def choose_udc():
+    """Pick the USB controller to bind. Spruce's own gadget holds one on some devices,
+    and some kernels expose more than one, so honour settings.json "udc" first and
+    otherwise take a controller no other gadget owns."""
+    names = udc_names()
+    if not names:
+        return None
+    want = str(load_settings().get("udc") or "").strip()
+    if want:
+        if want in names:
+            return want
+        log("settings.json asks for USB controller %r but this device has: %s"
+            % (want, ", ".join(names)))
+    busy = bound_udcs()
+    free = [n for n in names if n not in busy]
+    if free:
+        if len(names) > 1:
+            log("USB controllers:", ", ".join(names), "-> using", free[0])
+        return free[0]
+    log("every USB controller is already used by another gadget (%s); trying %s anyway"
+        % (", ".join("%s by %s" % (k, v) for k, v in busy.items()), names[0]))
+    return names[0]
 
 
 def have_usb_gadget():
@@ -941,7 +1034,7 @@ def mount_configfs():
 
 
 def load_gadget_modules():
-    for mod in ("libcomposite", "usb_f_hid"):
+    for mod in ("libcomposite", "usb_f_hid", "usb_f_fs"):
         try:
             subprocess.run(["modprobe", mod], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
@@ -987,40 +1080,169 @@ def usb_gadget_remove():
     _remove_tree(USB_GADGET_PATH)
 
 
-def usb_hid_probe():
-    """--check: is configfs + the HID function available? Creates no bound gadget."""
-    if not mount_configfs():
-        return False, "configfs is not available"
-    load_gadget_modules()
-    path = USB_GADGET_ROOT + "/btpad-probe"
-    if os.path.isdir(path):
-        usb_gadget_remove_tree(path)
+def gadget_names():
     try:
-        os.mkdir(path)
-        os.makedirs(path + "/functions/hid.probe")
-    except OSError as e:
-        return False, "HID function not available (%s)" % e
+        return sorted(os.listdir(USB_GADGET_ROOT))
+    except OSError:
+        return []
+
+
+def gadget_bound_to(udc):
+    """Name of the gadget currently bound to this UDC, if any."""
+    for name in gadget_names():
+        try:
+            if _read(os.path.join(USB_GADGET_ROOT, name, "UDC")) == udc:
+                return name
+        except OSError:
+            pass
+    return None
+
+
+def gadget_config_path(path):
+    """The (first) config directory of a gadget, or None."""
+    try:
+        names = sorted(n for n in os.listdir(path + "/configs") if n.startswith("c."))
+    except OSError:
+        return None
+    return path + "/configs/" + names[0] if names else None
+
+
+def usb_probe_functions():
+    """Which configfs HID paths work here: (f_hid, functionfs, gadget name).
+
+    Creating a throwaway function inside an existing gadget is safe (an unbound
+    function does nothing) and is the only way to probe on kernels that allow a
+    single gadget, where mkdir of a second gadget fails with ENOMEM."""
+    if not mount_configfs():
+        return False, False, None
+    load_gadget_modules()
+    names = gadget_names()
+    own = not names
+    path = os.path.join(USB_GADGET_ROOT, names[0]) if names else USB_GADGET_ROOT + "/btpad-probe"
+    if own:
+        try:
+            os.mkdir(path)
+        except OSError:
+            return False, False, None
+        os.makedirs(path + "/functions", exist_ok=True)
+    hid = ffs = False
+    try:
+        for kind in ("hid", "ffs"):
+            p = path + "/functions/%s.probe" % kind
+            try:
+                os.mkdir(p)
+            except OSError:
+                continue
+            if kind == "hid":
+                hid = True
+            else:
+                ffs = True
+            _remove_tree(p)
     finally:
-        usb_gadget_remove_tree(path)
-    if not first_udc():
-        return False, "HID function available, but no UDC in /sys/class/udc"
-    return True, "HID function available (UDC %s)" % first_udc()
+        if own:
+            _remove_tree(path)
+    return hid, ffs, (names[0] if names else None)
+
+
+def usb_hid_probe():
+    """--check: can this kernel do USB HID gadget mode, and how?"""
+    if not udc_names():
+        return False, "no USB device controller (/sys/class/udc is empty)"
+    hid, ffs, name = usb_probe_functions()
+    if not hid and not ffs:
+        return False, ("configfs is there, but this kernel has neither f_hid nor "
+                       "FunctionFS (CONFIG_USB_CONFIGFS_F_HID / _F_FS)")
+    if name:
+        sharing = " (shares the existing gadget %s)" % name
+    else:
+        sharing = ""
+    if hid:
+        return True, "kernel HID function f_hid -> /dev/hidg0" + sharing
+    return True, "no f_hid, using FunctionFS HID in userspace" + sharing
+
+
+def otg_role_paths():
+    return glob.glob("/sys/bus/platform/devices/usbc*/otg_role")
+
+
+def set_device_role():
+    """Some handhelds wire the data port to the OTG controller but leave it in
+    host role until told otherwise; with the cable in that port the pad can then
+    never enumerate. Returns (path, old role) when it changed something."""
+    for path in otg_role_paths():
+        try:
+            role = _read(path)
+        except OSError:
+            continue
+        if role == "usb_device":
+            return None, None
+        try:
+            _write(path, "usb_device")
+        except OSError as e:
+            log("could not switch %s to usb_device: %s" % (path, e))
+            return None, None
+        log("USB: switched %s from %s to usb_device" % (path, role))
+        return path, role
+    return None, None
 
 
 def usb_gadget_remove_tree(path):
     _remove_tree(path)
 
 
+def ffs_report_path():
+    """FunctionFS names its endpoint files after the endpoint address on most
+    kernels ("ep81") and after the endpoint index on some ("ep1"). Take whatever
+    appeared once the descriptors were accepted."""
+    try:
+        names = sorted(n for n in os.listdir(FFS_DIR) if n != "ep0")
+    except OSError:
+        return None
+    return os.path.join(FFS_DIR, names[0]) if names else None
+
+
+def ffs_descriptors():
+    """FunctionFS descriptor block: one HID interface with an interrupt IN
+    endpoint. The kernel rewrites bInterfaceNumber and picks the physical
+    endpoint, so the numbers here are only our local names."""
+    intf = struct.pack("<BBBBBBBBB", 9, 0x04, 0, 0, 1, 0x03, 0, 0, 0)
+    ep = struct.pack("<BBBBHB", 7, 0x05, 0x81, 0x03, REPORT_LENGTH, 1)
+    body = intf + HID_DESC + ep
+    # magic 1 is the plain (legacy) header: magic, length, fs_count, hs_count.
+    # The counts are *descriptor* counts, not bytes.
+    return struct.pack("<IIII", 1, 16 + len(body), 3, 0) + body
+
+
+def ffs_strings():
+    # We reference no strings, and then both counts have to be zero.
+    return struct.pack("<IIII", 2, 16, 0, 0)
+
+
 class UsbGadget:
-    """USB HID gamepad backend: configfs gadget + /dev/hidg0."""
+    """USB HID gamepad: configfs f_hid when the kernel has it, otherwise a HID
+    function driven from userspace through FunctionFS."""
 
     def __init__(self, name):
         self.name = name
         self.udc = None
-        self.fd = None
-        self._connected = False
-        self._checked = 0.0
-        self._open_warned = False
+        self.mode = None          # "hid" (f_hid) or "ffs" (FunctionFS)
+        self.fd = None            # report endpoint
+        self.ep0 = None           # FunctionFS control endpoint
+        self.gadget = None        # configfs gadget dir in use
+        self.fn = None            # our function dir
+        self.link = None          # our function symlink inside the config
+        self.own_gadget = False
+        self.restore_udc = None
+        self.old_product = None
+        self.role_path = None
+        self.role_restore = None
+        self.host = False
+        self.enabled = False     # FunctionFS sent FUNCTIONFS_ENABLE
+        self.pending = None
+        self.report = bytes(REPORT_LENGTH)
+        self.wrote_once = False
+        self._open_warned = 0.0
+        self._open_try = 0.0
 
     def start(self):
         if os.getuid() != 0:
@@ -1028,9 +1250,29 @@ class UsbGadget:
         if not mount_configfs():
             raise RuntimeError("configfs is not available (mount -t configfs none /sys/kernel/config failed)")
         load_gadget_modules()
-        self.udc = first_udc()
+        # Some handhelds keep the OTG/data port in host role until told
+        # otherwise; do it before looking for a controller to bind.
+        self.role_path, self.role_restore = set_device_role()
+        if self.role_path:
+            time.sleep(0.5)   # the UDC is re-registered when the role changes
+        self.udc = choose_udc()
         if not self.udc:
             raise RuntimeError("no USB device controller (/sys/class/udc is empty)")
+        try:
+            self._start_hid()
+            return
+        except Exception as e:
+            hid_error = e
+            self._teardown()
+        try:
+            self._start_ffs()
+        except Exception as e:
+            self._teardown()
+            raise RuntimeError("no HID gadget (%s), and FunctionFS HID failed too (%s)"
+                               % (hid_error, e))
+
+    # -- path 1: kernel f_hid, /dev/hidg0 -----------------------------
+    def _start_hid(self):
         usb_gadget_remove()
         if os.path.isdir(USB_GADGET_PATH):
             try:
@@ -1040,8 +1282,17 @@ class UsbGadget:
         if os.path.isdir(USB_GADGET_PATH):
             raise RuntimeError("a stale USB gadget at %s could not be removed; reboot and retry"
                                % USB_GADGET_PATH)
+        # Ask first whether f_hid exists. Creating a second gadget on vendor
+        # kernels that allow only one fails halfway and can leave configfs in a
+        # state where the next bind wedges the USB controller, so do not try it
+        # unless the kernel really has the function.
+        hid_ok, _ffs_ok, _name = usb_probe_functions()
+        if not hid_ok:
+            raise RuntimeError("the kernel has no USB HID gadget function (f_hid)")
         try:
             os.mkdir(USB_GADGET_PATH)
+            self.own_gadget = True
+            self.gadget = USB_GADGET_PATH
             os.makedirs(USB_GADGET_PATH + "/functions", exist_ok=True)
             _write(USB_GADGET_PATH + "/idVendor", USB_VID)
             _write(USB_GADGET_PATH + "/idProduct", USB_PID)
@@ -1052,60 +1303,267 @@ class UsbGadget:
             _write(USB_GADGET_PATH + "/strings/0x409/product", self.name)
             _write(USB_GADGET_PATH + "/strings/0x409/serialnumber", "SPRUCEBTPAD01")
 
-            try:
-                os.mkdir(USB_GADGET_PATH + "/functions/hid.usb0")
-            except OSError as e:
-                raise RuntimeError("the kernel has no USB HID gadget function "
-                                   "(configfs f_hid/usb_f_hid): %s" % e)
-            fn = USB_GADGET_PATH + "/functions/hid.usb0"
-            _write(fn + "/protocol", "0")
-            _write(fn + "/subclass", "0")
-            _write(fn + "/report_length", str(REPORT_LENGTH))
-            with open(fn + "/report_desc", "wb") as f:
+            self.fn = USB_GADGET_PATH + "/functions/hid.usb0"
+            os.mkdir(self.fn)
+            _write(self.fn + "/protocol", "0")
+            _write(self.fn + "/subclass", "0")
+            _write(self.fn + "/report_length", str(REPORT_LENGTH))
+            with open(self.fn + "/report_desc", "wb") as f:
                 f.write(REPORT_DESC)
 
             os.makedirs(USB_GADGET_PATH + "/configs/c.1/strings/0x409")
             _write(USB_GADGET_PATH + "/configs/c.1/strings/0x409/configuration", "HID Gamepad")
             _write(USB_GADGET_PATH + "/configs/c.1/MaxPower", "250")
-            os.symlink(fn, USB_GADGET_PATH + "/configs/c.1/hid.usb0")
+            self.link = USB_GADGET_PATH + "/configs/c.1/hid.usb0"
+            os.symlink(self.fn, self.link)
             _write(USB_GADGET_PATH + "/UDC", self.udc)
+            if _read(USB_GADGET_PATH + "/UDC") != self.udc:
+                raise RuntimeError("could not bind the USB gadget to %s" % self.udc)
         except Exception:
             usb_gadget_remove()
+            self.own_gadget = False
+            self.gadget = self.fn = self.link = None
             raise
+        self.mode = "hid"
+        log("USB HID gadget (f_hid) ready on %s; plug the cable into the tablet/PC" % self.udc)
+        self._open()  # the node exists as soon as f_hid is bound
 
-        if _read(USB_GADGET_PATH + "/UDC") != self.udc:
-            usb_gadget_remove()
-            raise RuntimeError("could not bind the USB gadget to %s" % self.udc)
-        log("USB gadget ready on %s; plug the cable into the tablet/PC" % self.udc)
+    # -- path 2: HID over FunctionFS, added to an existing gadget ------
+    def _pick_gadget(self):
+        name = gadget_bound_to(self.udc)
+        if not name:
+            names = [n for n in gadget_names() if n != USB_GADGET_NAME]
+            name = names[0] if names else None
+        return os.path.join(USB_GADGET_ROOT, name) if name else None
 
-    def connected(self):
-        now = time.time()
-        if now - self._checked < 0.25:
-            return self._connected
-        self._checked = now
+    def _start_ffs(self):
+        self.mode = "ffs"
+        self.gadget = self._pick_gadget()
+        if not self.gadget:
+            raise RuntimeError("there is no configfs gadget to attach a function to")
         try:
-            self._connected = _read("/sys/class/udc/%s/state" % self.udc) == "configured"
+            self.restore_udc = _read(self.gadget + "/UDC") or None
         except OSError:
-            self._connected = False
-        return self._connected
+            self.restore_udc = None
+        cfg = gadget_config_path(self.gadget)
+        if not cfg:
+            raise RuntimeError("%s has no configuration" % self.gadget)
+        self.link = cfg + "/ffs." + FFS_NAME
+        # Clean up whatever a crashed earlier run left behind: an old link or
+        # mount would make the function directory impossible to remove.
+        if os.path.lexists(self.link):
+            try:
+                os.unlink(self.link)
+            except OSError:
+                pass
+        if os.path.isdir(FFS_DIR):
+            try:
+                subprocess.run(["umount", FFS_DIR], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
+        self.fn = self.gadget + "/functions/ffs." + FFS_NAME
+        if os.path.isdir(self.fn):
+            _remove_tree(self.fn)
+        os.mkdir(self.fn)
+        log("USB: function ffs.%s created" % FFS_NAME)
+        os.makedirs(FFS_DIR, exist_ok=True)
+        r = subprocess.run(["mount", "-t", "functionfs", FFS_NAME, FFS_DIR],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode != 0:
+            raise RuntimeError("mount -t functionfs failed: %s"
+                               % r.stdout.decode(errors="replace").strip())
+        # Descriptors first, then the (empty) string block: only after both does
+        # FunctionFS accept control requests, and the gadget must not be bound
+        # before that. All of this is safe while the gadget is still bound, so
+        # it happens BEFORE the unbind: the window in which the vendor's ADB
+        # workqueue (android_work) can steal the controller back is then only
+        # the few milliseconds between the unbind and our bind below.
+        self._rename_product()
+        self.ep0 = os.open(FFS_EP0, os.O_RDWR)
+        os.write(self.ep0, ffs_descriptors())
+        os.write(self.ep0, ffs_strings())
+        os.set_blocking(self.ep0, False)
+        log("USB: descriptors accepted by FunctionFS")
+        if self.restore_udc:
+            _write(self.gadget + "/UDC", "")
+            log("USB: unbound %s" % os.path.basename(self.gadget))
+        os.symlink(self.fn, self.link)
+        log("USB: function linked into %s" % os.path.basename(cfg))
+        self._bind_udc()
+        log("USB HID gadget (FunctionFS) ready on %s, added to %s"
+            % (self.udc, os.path.basename(self.gadget)))
+        log("USB: waiting for the host to enable the HID function")
+
+    def _rename_product(self):
+        """The host should see the pad, not the vendor ADB gadget name."""
+        prod = self.gadget + "/strings/0x409/product"
+        try:
+            self.old_product = _read(prod)
+        except OSError:
+            self.old_product = None
+        if self.old_product != USB_PRODUCT:
+            try:
+                _write(prod, USB_PRODUCT)
+            except OSError:
+                self.old_product = None
+                return
+            log("USB: product string now %r (was %r)" % (USB_PRODUCT, self.old_product))
+
+    def _restore_product(self):
+        if self.gadget and self.old_product:
+            try:
+                _write(self.gadget + "/strings/0x409/product", self.old_product)
+            except OSError:
+                pass
+        self.old_product = None
+
+    def _bind_udc(self):
+        """Write our controller into UDC. If something else (the vendor ADB
+        workqueue) grabbed the controller in the meantime, unbind it and take
+        the controller right back; there is no notification between the two
+        writes, so a fast retry wins the race."""
+        err = None
+        for attempt in range(10):
+            try:
+                _write(self.gadget + "/UDC", self.udc)
+            except OSError as e:
+                err = e
+                owner = _read(self.gadget + "/UDC")
+                if owner:
+                    log("USB: %s was reclaimed (%s); taking it back"
+                        % (self.udc, owner))
+                    try:
+                        _write(self.gadget + "/UDC", "")
+                    except OSError:
+                        pass
+                else:
+                    log("USB: binding to %s failed (%s); retrying" % (self.udc, e))
+                time.sleep(0.05)
+                continue
+            if _read(self.gadget + "/UDC") == self.udc:
+                return
+            err = RuntimeError("UDC read back %r" % _read(self.gadget + "/UDC"))
+            time.sleep(0.05)
+        raise RuntimeError("could not bind %s to %s (%s)"
+                           % (self.gadget, self.udc, err))
+
+    # Do not open the report endpoint yet: on this hardware a write into a
+    # function the host has not enabled locks up the USB controller, so the
+    # endpoint is opened only after FUNCTIONFS_ENABLE (see _pump_ep0).
+
+    # -- runtime ------------------------------------------------------
+    def tick(self):
+        """Handle control requests and follow the controller state. Called once
+        per main-loop pass; never decides whether reports may be sent."""
+        if self.mode == "ffs":
+            self._pump_ep0()
+        st = udc_state(self.udc)
+        if st == "configured" and not self.host:
+            self.host = True
+            log("USB host configured the pad - live (controller state %r)" % st)
+            self._open()
+        elif st != "configured" and self.host:
+            self.host = False
+            log("USB host disconnected (controller state %r); waiting for reconnect" % st)
+            if self.fd is not None:
+                self._close_fd(quiet=True)
+        if st == "configured" and self.fd is None and time.time() - self._open_try > 1.0:
+            # FunctionFS creates its endpoint file only once the host has
+            # enabled the function, so a configured gadget without an open
+            # report pipe should try again (rate limited).
+            self._open()
+        return st
+
+    def _pump_ep0(self):
+        if self.ep0 is None:
+            return
+        while True:
+            try:
+                ev = os.read(self.ep0, 12)
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                    return
+                log("USB control endpoint error:", e)
+                return
+            if len(ev) < 12:
+                return
+            kind = ev[8]
+            if kind == FFS_SETUP:
+                self._control(ev[:8])
+            elif kind == FFS_DISABLE:
+                # The host deconfigured or reset us; the old report pipe is dead.
+                self.host = False
+                self.enabled = False
+                self._close_fd(quiet=True)
+            elif kind == FFS_ENABLE:
+                self.enabled = True
+                self.host = True
+                self._open()
+
+    def _control(self, raw):
+        bm, req, val, _idx, length = struct.unpack("<BBHHH", raw)
+        kind = val >> 8
+        if bm & 0x80:                       # IN: the host reads from us
+            if req == 0x06 and kind == 0x21:
+                self._ep0_write(HID_DESC)
+            elif req == 0x06 and kind == 0x22:
+                self._ep0_write(REPORT_DESC)
+            elif req == 0x01 and (bm & 0x60) == 0x20:      # GET_REPORT
+                self._ep0_write(self.report[:length])
+            else:
+                self._ep0_write(b"")        # ack class requests we do not use
+            return
+        if length:                          # OUT with data, e.g. SET_REPORT
+            try:
+                os.read(self.ep0, length)
+            except OSError:
+                pass
+
+    def _ep0_write(self, data):
+        if self.ep0 is None:
+            return
+        try:
+            os.write(self.ep0, data)
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                log("USB control reply failed:", e)
+
+    def _report_path(self):
+        if self.mode == "ffs":
+            # The kernel creates this file only after the descriptors are
+            # accepted, and its name varies ("ep81" or "ep1").
+            return ffs_report_path()
+        return USB_HIDG
 
     def _open(self):
-        if not os.path.exists(USB_HIDG):
+        if self.fd is not None:
+            return
+        if self.mode == "ffs" and not self.enabled:
+            # Writes to a FunctionFS endpoint before FUNCTIONFS_ENABLE can wedge
+            # the controller on this hardware.
+            return
+        self._open_try = time.time()
+        path = self._report_path()
+        if path is None:
+            return
+        if self.mode != "ffs" and not os.path.exists(path):
             # Minimal systems without devtmpfs/mdev rules need the node made by hand.
             try:
-                dev = _read("/sys/class/hidg/%s/dev" % os.path.basename(USB_HIDG))
+                dev = _read("/sys/class/hidg/%s/dev" % os.path.basename(path))
                 major, minor = (int(x) for x in dev.split(":"))
-                os.mknod(USB_HIDG, stat.S_IFCHR | 0o600, os.makedev(major, minor))
+                os.mknod(path, stat.S_IFCHR | 0o600, os.makedev(major, minor))
             except (OSError, ValueError):
                 pass
         try:
-            self.fd = os.open(USB_HIDG, os.O_WRONLY | os.O_NONBLOCK)
-            self._open_warned = False
-            log("USB host connected - pad is live")
+            self.fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            self._open_warned = 0.0
+            log("USB: %s open, sending reports" % path)
         except OSError as e:
-            if not self._open_warned:
-                log("could not open %s: %s" % (USB_HIDG, e))
-                self._open_warned = True
+            # warn at most every 15 s so a missing node does not flood the log
+            if time.time() - self._open_warned > 15:
+                log("could not open %s: %s" % (path, e))
+                self._open_warned = time.time()
 
     def _close_fd(self, quiet=False):
         if self.fd is not None:
@@ -1114,27 +1572,114 @@ class UsbGadget:
             except OSError:
                 pass
             self.fd = None
+            self._open_try = 0.0
             if not quiet:
-                log("USB host disconnected; waiting for reconnect")
+                log("closing %s; waiting for the host" % self._report_path())
 
     def push(self, report):
-        if not self.connected():
-            self._close_fd()
-            return
+        """Send one report. A full pipe is not an error: keep it and retry in flush()."""
+        self.report = report
+        if self.mode == "ffs" and not self.enabled:
+            # Never touch the endpoint before the host enabled the function.
+            self.pending = report
+            return False
+        if not self.host:
+            # Same for the f_hid path: nothing to talk to before the host has
+            # configured the gadget. Writing early can hang this USB controller.
+            self.pending = report
+            return False
         if self.fd is None:
             self._open()
         if self.fd is None:
-            return
+            self.pending = report
+            return False
         try:
             os.write(self.fd, report)
         except OSError as e:
-            if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
-                self._close_fd()
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                self.pending = report
+                return False
+            # EPIPE/ECONNRESET/ESHUTDOWN mean the host reset or deconfigured us;
+            # that is a normal unplug, not an error worth a line per report.
+            if e.errno in (errno.EPIPE, errno.ECONNRESET, errno.ESHUTDOWN):
+                self._close_fd(quiet=True)
+                self.host = False
+            else:
+                log("USB write failed (%s); reopening %s" % (e, self._report_path()))
+                self._close_fd(quiet=True)
+            self.pending = report
+            return False
+        self.pending = None
+        if not self.wrote_once:
+            self.wrote_once = True
+            log("USB: first report accepted by the host")
+        return True
+
+    def flush(self):
+        if self.pending is not None:
+            return self.push(self.pending)
+        return False
 
     def close(self):
+        self.pending = None
         self._close_fd(quiet=True)
-        usb_gadget_remove()
+        self._teardown()
         log("USB gadget removed")
+
+    def _teardown(self):
+        if self.mode == "ffs":
+            self._stop_ffs()
+        elif self.mode == "hid":
+            usb_gadget_remove()
+            self.own_gadget = False
+        self.mode = None
+        if self.role_path:
+            # Switching the OTG controller back and forth is what makes this
+            # hardware hang (and then reboot through its 16 s watchdog), so the
+            # device role is left in place. A reboot restores host mode.
+            log("USB: leaving %s in device role; reboot to use the port as a host again"
+                % self.role_path)
+            self.role_path = self.role_restore = None
+
+    def _stop_ffs(self):
+        if self.ep0 is not None:
+            try:
+                os.close(self.ep0)
+            except OSError:
+                pass
+            self.ep0 = None
+        if self.gadget:
+            try:
+                _write(self.gadget + "/UDC", "")
+            except OSError:
+                pass
+        time.sleep(0.2)
+        if self.link and os.path.lexists(self.link):
+            try:
+                os.unlink(self.link)
+            except OSError:
+                pass
+        try:
+            subprocess.run(["umount", FFS_DIR], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+        if self.fn and os.path.isdir(self.fn):
+            _remove_tree(self.fn)
+        try:
+            os.rmdir(FFS_DIR)
+        except OSError:
+            pass
+        if self.own_gadget:
+            usb_gadget_remove()
+        elif self.gadget and self.restore_udc:
+            self._restore_product()
+            try:
+                _write(self.gadget + "/UDC", self.restore_udc)
+            except OSError:
+                pass
+        self.own_gadget = False
+        self.gadget = self.fn = self.link = None
 
 
 # ---------------------------------------------------------------- mode selection
@@ -1197,8 +1742,27 @@ def do_check():
         print("%-13s %s" % (tool, "found" if found else "not in PATH"))
     print("bluetooth adapter:", "yes" if has_bluetooth_adapter() else "no")
     print("bluetoothd:", bluetoothd_info())
-    print("USB controllers:", ", ".join(sorted(os.listdir("/sys/class/udc")))
-          if os.path.isdir("/sys/class/udc") and os.listdir("/sys/class/udc") else "none")
+    names = udc_names()
+    busy = bound_udcs()
+    if names:
+        print("USB controllers:", ", ".join(
+            "%s[%s%s]" % (n, udc_state(n), ", used by " + busy[n] if n in busy else "")
+            for n in names))
+    else:
+        print("USB controllers: none (/sys/class/udc is empty)")
+    print("hidg node:", USB_HIDG if os.path.exists(USB_HIDG)
+          else USB_HIDG + " absent (not needed with FunctionFS)")
+    roles = otg_role_paths()
+    for p in roles:
+        try:
+            print("otg role:", p, "=", _read(p))
+        except OSError:
+            pass
+    if not roles:
+        print("otg role: none (no usbc*/otg_role on this device)")
+    want_udc = str(load_settings().get("udc") or "").strip()
+    if want_udc:
+        print("settings.json udc:", want_udc)
     ok, msg = usb_hid_probe()
     print("USB HID gadget:", ("OK - " if ok else "FAILED - ") + msg)
     print("uid:", os.getuid(), "(needs 0)")
@@ -1215,6 +1779,70 @@ def do_check():
     for p in pads:
         os.close(p.fd)
     print("mode that auto would choose:", choose_mode())
+
+
+def do_devices():
+    """List every input device with the codes it can send (for a missing profile)."""
+    profiles, _want = load_mapping()
+    paths = sorted(glob.glob("/dev/input/event*"))
+    if not paths:
+        print("no /dev/input/event* devices")
+        return
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as e:
+            print("%-16s <%s>" % (path, e))
+            continue
+        name = ev_name(fd)
+        keys, absc = ev_bits(fd, EV_KEY), ev_bits(fd, EV_ABS)
+        prof = None
+        for pr in profiles:
+            if pr["devices"] and (path in pr["devices"]
+                                  or any(d.lower() in name.lower() for d in pr["devices"])):
+                prof = pr
+                break
+        print("%s  %r" % (path, name))
+        print("    %s%s" % ("gamepad-like" if _looks_like_pad(keys, absc) else "not a gamepad",
+                            "; profile: " + prof["name"] if prof else
+                            "; no profile (would fall back)"))
+        if keys:
+            shown = [c for c in sorted(keys) if c < 0x300]
+            print("    keys:", " ".join(str(c) for c in shown) or "none")
+        if absc:
+            print("    abs :", " ".join("%d(%d..%d)" % (c, *abs_range(fd, c))
+                                        for c in sorted(absc) if c < 0x40) or "none")
+        os.close(fd)
+
+
+def do_usb_test():
+    """--usb-test: bind the gadget and pulse A, to check the host side without the pad."""
+    usb = UsbGadget("BTPad test pad")
+    try:
+        usb.start()
+    except Exception as e:
+        log("could not start:", e)
+        if have_usb_gadget():
+            log("run --check to see whether this kernel supports USB HID gadget mode")
+        return 1
+    log("USB test: pulsing button A (bit 1) every 0.5 s - watch the host")
+    on = False
+    last_note = time.time()
+    try:
+        while True:
+            st = usb.tick()
+            if not usb.host and time.time() - last_note > 10:
+                log("waiting for a host; controller state %r (cable in the data/OTG port?)" % st)
+                last_note = time.time()
+            usb.push(bytes([0x01, 0x01 if on else 0x00, 0x00, 0x00, 0x80, 0x80, 0x80, 0x80]))
+            usb.flush()
+            on = not on
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        usb.close()
+    return 0
 
 
 def do_probe(all_devices=False):
@@ -1295,7 +1923,11 @@ def do_sticks():
                   % (name, radius[side]))
 
 
-def run():
+def run(frame_cb=None, overrides=None):
+    """Run the pad. frame_cb(state) is called every loop pass (used by the
+    Gamepad Mode UI to draw the live layout); overrides carries the settings
+    made in that UI: keys {evdev code: hid button}, disabled [hid button],
+    sensitivity {lx/ly/rx/ry: percent}. Both default to the plain CLI run."""
     debug = "--debug" in sys.argv
     grab = "--nograb" not in sys.argv
     running = [True]
@@ -1308,6 +1940,17 @@ def run():
         log("no gamepad input devices found; run --check / --probe")
         return 1
     prof, first = choose_profile(pads, profiles)
+    if overrides:
+        prof = dict(prof)
+        remap = overrides.get("keys") or {}
+        disabled = set(overrides.get("disabled") or ())
+        if remap:
+            prof["keys"] = {int(c): int(h) for c, h in remap.items()}
+        if disabled:
+            prof["keys"] = {c: h for c, h in prof["keys"].items() if h not in disabled}
+        log("settings applied: %d remap, %d disabled, sensitivity %s"
+            % (len(overrides.get("keys") or {}), len(disabled),
+               overrides.get("sensitivity") or {}))
     pads = keep_pads(pads, prof, first)
     for p in pads:
         log("using", p.path, p.name)
@@ -1352,10 +1995,13 @@ def run():
                 pass
         return 1
 
-    state = State(prof["keys"], prof["dpad_keys"], prof["axes"], prof["trigger_axes"])
+    state = State(prof["keys"], prof["dpad_keys"], prof["axes"], prof["trigger_axes"],
+                  sensitivity=(overrides or {}).get("sensitivity"))
     byfd = {p.fd: p for p in pads}
     exit_since = None
     last_push = 0.0
+    seen_input = False
+    warned_input = time.time()
 
     def push():
         report = state.report()
@@ -1391,12 +2037,25 @@ def run():
                         _sec, _usec, t, c, v = struct.unpack(EVENT_FMT, data[off:off + EVENT_SIZE])
                         if t in (EV_KEY, EV_ABS):
                             changed |= state.feed(pad, t, c, v)
+                    if changed and not seen_input:
+                        seen_input = True
+                        log("first input seen on %r - mapping is live" % pad.name)
                     if changed:
                         push()
                         last_push = time.time()
-            if ((bt and bt.intr) or (usb and usb.connected())) and time.time() - last_push > 0.1:
+            if usb:
+                usb.tick()
+                if usb.pending is not None:
+                    usb.flush()
+                if not seen_input and time.time() - warned_input > 10:
+                    warned_input = time.time()
+                    log("no button or stick events yet; if the host shows the pad but nothing "
+                        "happens, quit and run: btpad.py --devices")
+            if ((bt and bt.intr) or (usb and usb.host)) and time.time() - last_push > 0.1:
                 push()  # keep-alive: re-send the current state so a lost report cannot stick
                 last_push = time.time()
+            if frame_cb:
+                frame_cb(state)
             if state.exit_combo_held():
                 exit_since = exit_since or time.time()
                 if time.time() - exit_since > EXIT_HOLD_SECONDS:
@@ -1421,6 +2080,10 @@ def run():
 if __name__ == "__main__":
     if "--check" in sys.argv:
         do_check()
+    elif "--devices" in sys.argv:
+        do_devices()
+    elif "--usb-test" in sys.argv:
+        sys.exit(do_usb_test())
     elif "--sticks" in sys.argv:
         do_sticks()
     elif "--probe" in sys.argv:

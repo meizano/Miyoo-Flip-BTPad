@@ -1,7 +1,7 @@
 {
-    "label": "BT/USB Gamepad",
+    "label": "Gamepad Mode",
     "icon": "",
     "iconsel": "",
     "launch": "launch.sh",
-    "description": "Use this handheld as a Bluetooth or USB-cable gamepad (hold L1+R1+Select+Start to quit)"
+    "description": "Use this handheld as a wired Retro Gamepad (USB-C). Remap buttons, disable buttons and set stick sensitivity in Settings."
 }
