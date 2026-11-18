@@ -134,9 +134,12 @@ state, which is the first thing to look at when something does not work.
   USB-A→USB-C cable to the handheld — the adapter's resistor forces the
   phone into host mode reliably. Some Samsung models also need **Settings →
   Connections → More connection settings → USB OTG** enabled, and lint or
-  moisture in the phone's port can produce the same toast. To isolate the
-  phone: try a known USB OTG device (flash drive/mouse) with the same
-  adapter — if that fails too, it is the phone/cable, not Gamepad Mode.
+  moisture in the phone's port can produce the same toast. **Confirmed
+  working:** Samsung Galaxy S25 Edge and Lenovo Y700 (SD8 Elite) both reject
+  a direct C-to-C cable but work with a **USB-C OTG adapter + USB-A→USB-C
+  cable** into the Zero 28's data port. To isolate the phone: try a known
+  USB OTG device (flash drive/mouse) with the same adapter — if that fails
+  too, it is the phone/cable, not Gamepad Mode.
 - **The pad was working and stopped.** If the log shows the app fighting
   another copy, the launcher already kills stale instances — just relaunch.
 - **Handheld hard-resets under load / SD card goes read-only.** This is
