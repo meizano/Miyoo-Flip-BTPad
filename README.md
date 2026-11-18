@@ -122,6 +122,21 @@ state, which is the first thing to look at when something does not work.
 - **The screen goes black and returns to the menu.** Check `gamepadmode.log`.
   The UI needs pysdl2 + SDL_ttf from PyUI (present on every SpruceOS install)
   and a usable TTF font in PyUI's fonts folder.
+- **Android/Samsung shows "Analog USB device not supported"** ("Perangkat USB
+  analog tidak didukung") and the layout stays red **no USB host**: this is
+  the phone's USB-C port mistaking the cable for a passive analog-headset
+  adapter — it happens before USB enumeration, so it is not a gamepad/HID
+  problem (the same cable works on a PC). Fixes, in order: flip the USB-C
+  plug at the phone end (many handhelds terminate only one CC pin, so
+  orientation matters); try a short, simple **USB 2.0** C-to-C data cable
+  (not an e-marked/Thunderbolt or charge-only cable); or use a real **USB-C
+  OTG adapter** on the phone (USB-C plug to USB-A socket) with a normal
+  USB-A→USB-C cable to the handheld — the adapter's resistor forces the
+  phone into host mode reliably. Some Samsung models also need **Settings →
+  Connections → More connection settings → USB OTG** enabled, and lint or
+  moisture in the phone's port can produce the same toast. To isolate the
+  phone: try a known USB OTG device (flash drive/mouse) with the same
+  adapter — if that fails too, it is the phone/cable, not Gamepad Mode.
 - **The pad was working and stopped.** If the log shows the app fighting
   another copy, the launcher already kills stale instances — just relaunch.
 - **Handheld hard-resets under load / SD card goes read-only.** This is
